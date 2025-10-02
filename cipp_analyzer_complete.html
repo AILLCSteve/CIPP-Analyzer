@@ -1673,27 +1673,32 @@ ${text}
             }
 
             initializeLiveResults() {
-                // Initialize live results table with all questions
+                // Initialize live results table with all questions - SEQUENTIAL NUMBERING
                 this.allQuestions = [];
+                let globalQuestionNumber = 1; // Sequential numbering across ALL sections
 
                 Object.entries(this.getActiveSections()).forEach(([sectionName, questions]) => {
-                    questions.forEach((question, index) => {
+                    questions.forEach((question) => {
                         this.allQuestions.push({
                             section: sectionName,
-                            question_number: index + 1,
+                            question_number: globalQuestionNumber++, // Increment for each question
                             question: question,
                             answer: "Not yet found.",
                             citation: "Pending analysis...",
                             confidence: "pending",
                             pdf_page: "-",
-                            status: "pending"
+                            status: "pending",
+                            chunks_analyzed: [], // Track which chunks have been analyzed
+                            answer_fragments: [], // Accumulate answer pieces from chunks
+                            citation_fragments: [], // Accumulate citations from chunks
+                            pdf_pages: [] // Accumulate page numbers from chunks
                         });
                     });
                 });
 
                 this.updateLiveResultsDisplay();
                 document.getElementById('resultsSection').style.display = 'block';
-                Logger.info(`🔄 Initialized live results table with ${this.allQuestions.length} questions`);
+                Logger.info(`🔄 Initialized live results table with ${this.allQuestions.length} questions (sequentially numbered)`);
             }
 
             updateLiveResultsDisplay() {
@@ -1763,52 +1768,126 @@ ${text}
             }
 
             updateQuestionAnswer(sectionName, questionText, answer) {
-                // Find and update the question in the live table
+                // Find and ACCUMULATE the answer for this question (not replace!)
                 const questionIndex = this.allQuestions.findIndex(q =>
                     q.section === sectionName && q.question === questionText
                 );
 
                 if (questionIndex !== -1) {
-                    this.allQuestions[questionIndex] = {
-                        ...this.allQuestions[questionIndex],
-                        answer: answer.answer || "Not specified in this section",
-                        citation: answer.citation || "No citation",
-                        pdf_page: answer.pdf_page || "Unknown",
-                        confidence: answer.confidence || "medium",
-                        status: answer.answer && !answer.answer.toLowerCase().includes('not specified') ? 'found' : 'not_found'
-                    };
+                    const question = this.allQuestions[questionIndex];
+                    const chunkNum = answer.chunk_number || 0;
 
-                    // Update just this row for better performance
+                    // Skip if this chunk was already analyzed for this question
+                    if (question.chunks_analyzed.includes(chunkNum)) {
+                        Logger.debug(`⏭️ Skipping duplicate chunk ${chunkNum} for question #${question.question_number}`);
+                        return;
+                    }
+
+                    // Mark this chunk as analyzed
+                    question.chunks_analyzed.push(chunkNum);
+
+                    // Check if answer contains meaningful content (not "not specified" variations)
+                    const answerText = answer.answer || "";
+                    const isNotSpecified = answerText.toLowerCase().includes('not specified') ||
+                                          answerText.toLowerCase().includes('not found') ||
+                                          answerText.toLowerCase().includes('no information') ||
+                                          answerText.trim() === "";
+
+                    // ACCUMULATE answer fragments (only if meaningful content found)
+                    if (!isNotSpecified && answerText.length > 0) {
+                        question.answer_fragments.push({
+                            text: answerText,
+                            chunk: chunkNum,
+                            confidence: answer.confidence || "medium"
+                        });
+
+                        // Accumulate citations (avoid duplicates)
+                        const citation = answer.citation || "";
+                        if (citation && citation !== "No citation" && !question.citation_fragments.includes(citation)) {
+                            question.citation_fragments.push(citation);
+                        }
+
+                        // Accumulate PDF pages (avoid duplicates)
+                        const pdfPage = answer.pdf_page || "";
+                        if (pdfPage && pdfPage !== "Unknown" && !question.pdf_pages.includes(pdfPage)) {
+                            question.pdf_pages.push(pdfPage);
+                        }
+                    }
+
+                    // Build accumulated answer display
+                    if (question.answer_fragments.length > 0) {
+                        // Combine all answer fragments with chunk indicators
+                        question.answer = question.answer_fragments
+                            .map(frag => `[Chunk ${frag.chunk}] ${frag.text}`)
+                            .join(" | ");
+
+                        question.citation = question.citation_fragments.join("; ") || "Multiple sources";
+                        question.pdf_page = question.pdf_pages.join(", ") || "Multiple pages";
+
+                        // Calculate confidence based on number of chunks with answers
+                        const confidenceLevels = question.answer_fragments.map(f => f.confidence);
+                        if (confidenceLevels.includes("high") || question.answer_fragments.length >= 2) {
+                            question.confidence = "high";
+                        } else if (confidenceLevels.includes("medium")) {
+                            question.confidence = "medium";
+                        } else {
+                            question.confidence = "low";
+                        }
+
+                        question.status = 'found';
+                    } else {
+                        // No meaningful answers found yet
+                        question.answer = `Not yet found. (${question.chunks_analyzed.length} chunks analyzed)`;
+                        question.citation = "Pending analysis...";
+                        question.pdf_page = "-";
+                        question.confidence = "pending";
+                        question.status = "not_found";
+                    }
+
+                    // Update just this row for better performance (maintaining visual appeal)
                     const row = document.getElementById(`question-row-${questionIndex}`);
                     if (row) {
                         const statusColor = {
                             'found': '#28a745',
-                            'not_found': '#6c757d'
-                        }[this.allQuestions[questionIndex].status];
+                            'not_found': '#6c757d',
+                            'pending': '#ffc107'
+                        }[question.status];
+
+                        const confidenceColor = {
+                            'high': '#28a745',
+                            'medium': '#ffc107',
+                            'low': '#fd7e14',
+                            'pending': '#6c757d'
+                        }[question.confidence];
 
                         row.innerHTML = `
-                            <td style="padding: 12px; font-weight: 500; color: #333;">${this.allQuestions[questionIndex].section}</td>
-                            <td style="padding: 12px; text-align: center; font-weight: bold; color: #667eea;">${this.allQuestions[questionIndex].question_number}</td>
+                            <td style="padding: 12px; font-weight: 500; color: #333;">${question.section}</td>
+                            <td style="padding: 12px; text-align: center; font-weight: bold; color: #667eea;">${question.question_number}</td>
                             <td style="padding: 12px; max-width: 300px;">
-                                <div style="font-weight: 500; color: #333;">${this.allQuestions[questionIndex].question}</div>
+                                <div style="font-weight: 500; color: #333;">${question.question}</div>
                             </td>
                             <td style="padding: 12px; max-width: 400px;">
-                                <div style="line-height: 1.4; color: ${this.allQuestions[questionIndex].status === 'found' ? '#155724' : '#6c757d'};">${this.allQuestions[questionIndex].answer}</div>
+                                <div style="line-height: 1.4; color: ${question.status === 'found' ? '#155724' : '#6c757d'}; font-size: 14px;">${question.answer}</div>
                             </td>
                             <td style="padding: 12px; max-width: 250px;">
-                                <div style="font-style: italic; color: #666; font-size: 14px;">${this.allQuestions[questionIndex].citation}</div>
+                                <div style="font-style: italic; color: #666; font-size: 13px;">${question.citation}</div>
                             </td>
                             <td style="padding: 12px; text-align: center;">
-                                <span style="display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; color: white; background: ${statusColor};">
-                                    ${this.allQuestions[questionIndex].status}
-                                </span>
+                                <div style="margin-bottom: 4px;">
+                                    <span style="display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; color: white; background: ${statusColor};">
+                                        ${question.status}
+                                    </span>
+                                </div>
+                                <div style="font-size: 10px; color: ${confidenceColor}; font-weight: bold;">
+                                    ${question.confidence.toUpperCase()}
+                                </div>
                             </td>
                         `;
                     }
 
-                    // Update summary
+                    // Update summary stats
                     this.updateLiveResultsDisplay();
-                    Logger.success(`📝 Updated answer for: ${questionText.substring(0, 50)}...`);
+                    Logger.success(`📝 Accumulated answer for Q${question.question_number} from chunk ${chunkNum} (${question.answer_fragments.length} fragments total)`);
                 } else {
                     Logger.warning(`❓ Could not find question to update: ${questionText.substring(0, 50)}...`);
                 }
@@ -1818,12 +1897,13 @@ ${text}
                 const resultsContent = document.getElementById('resultsContent');
                 resultsContent.innerHTML = '';
 
-                if (this.results.length === 0) {
+                // Use accumulated allQuestions instead of raw results
+                if (!this.allQuestions || this.allQuestions.length === 0) {
                     resultsContent.innerHTML = '<p>No results to display.</p>';
                     return;
                 }
 
-                // Create enhanced table
+                // Create enhanced table showing UNIFIED accumulated results
                 let tableHTML = `
                     <table style="width: 100%; border-collapse: collapse; margin-top: 20px; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
                         <thead style="background: #667eea; color: white;">
@@ -1831,94 +1911,130 @@ ${text}
                                 <th style="padding: 12px; text-align: left; border-bottom: 2px solid #5a67d8;">Section</th>
                                 <th style="padding: 12px; text-align: center; border-bottom: 2px solid #5a67d8;">#</th>
                                 <th style="padding: 12px; text-align: left; border-bottom: 2px solid #5a67d8;">Question</th>
-                                <th style="padding: 12px; text-align: left; border-bottom: 2px solid #5a67d8;">Answer</th>
-                                <th style="padding: 12px; text-align: left; border-bottom: 2px solid #5a67d8;">Citation</th>
+                                <th style="padding: 12px; text-align: left; border-bottom: 2px solid #5a67d8;">Answer (Accumulated)</th>
+                                <th style="padding: 12px; text-align: left; border-bottom: 2px solid #5a67d8;">Citations</th>
+                                <th style="padding: 12px; text-align: center; border-bottom: 2px solid #5a67d8;">PDF Pages</th>
                                 <th style="padding: 12px; text-align: center; border-bottom: 2px solid #5a67d8;">Confidence</th>
-                                <th style="padding: 12px; text-align: center; border-bottom: 2px solid #5a67d8;">Chunk</th>
+                                <th style="padding: 12px; text-align: center; border-bottom: 2px solid #5a67d8;">Status</th>
                             </tr>
                         </thead>
                         <tbody>
                 `;
 
-                this.results.forEach((result, index) => {
+                // Count answered questions
+                const answeredCount = this.allQuestions.filter(q => q.status === 'found').length;
+
+                this.allQuestions.forEach((question, index) => {
                     const confidenceColor = {
                         'high': '#28a745',
                         'medium': '#ffc107',
-                        'low': '#dc3545',
-                        'synthesized': '#6f42c1',
-                        'error': '#dc3545'
-                    }[result.confidence] || '#6c757d';
+                        'low': '#fd7e14',
+                        'pending': '#6c757d'
+                    }[question.confidence] || '#6c757d';
+
+                    const statusColor = {
+                        'found': '#28a745',
+                        'not_found': '#6c757d',
+                        'pending': '#ffc107'
+                    }[question.status] || '#6c757d';
 
                     const rowStyle = index % 2 === 0 ? 'background: #f8f9fa;' : 'background: white;';
 
-                    // Special styling for raw responses
-                    const isRawResponse = result.is_raw_response;
-                    const rowBorder = isRawResponse ? 'border-left: 4px solid #dc3545;' : '';
+                    // Highlight rows with found answers
+                    const rowBorder = question.status === 'found' ? 'border-left: 4px solid #28a745;' : '';
 
                     tableHTML += `
                         <tr style="${rowStyle} border-bottom: 1px solid #dee2e6; ${rowBorder}">
-                            <td style="padding: 12px; font-weight: 500; color: ${isRawResponse ? '#dc3545' : '#333'};">${result.section || 'Other'}</td>
-                            <td style="padding: 12px; text-align: center; font-weight: bold; color: #667eea;">${result.question_number || index + 1}</td>
+                            <td style="padding: 12px; font-weight: 500; color: #333;">${question.section}</td>
+                            <td style="padding: 12px; text-align: center; font-weight: bold; color: #667eea; font-size: 16px;">${question.question_number}</td>
                             <td style="padding: 12px; max-width: 300px;">
-                                <div style="font-weight: 500; color: ${isRawResponse ? '#dc3545' : '#333'};">${result.question}</div>
+                                <div style="font-weight: 500; color: #333;">${question.question}</div>
                             </td>
                             <td style="padding: 12px; max-width: 400px;">
-                                ${isRawResponse ?
-                                    `<div style="background: #f8d7da; padding: 10px; border-radius: 4px; border: 1px solid #f5c6cb;">
-                                        <strong style="color: #721c24;">⚠️ JSON Parsing Failed - Raw ChatGPT Response:</strong><br>
-                                        <pre style="white-space: pre-wrap; margin-top: 10px; font-size: 12px; color: #721c24;">${result.answer.replace('PARSING FAILED - Raw ChatGPT Response: ', '')}</pre>
-                                    </div>` :
-                                    `<div style="line-height: 1.4; color: #555;">${result.answer}</div>`
+                                <div style="line-height: 1.6; color: ${question.status === 'found' ? '#155724' : '#6c757d'}; font-size: 14px;">${question.answer}</div>
+                                ${question.answer_fragments.length > 0 ?
+                                    `<div style="margin-top: 8px; padding: 6px; background: #e7f3ff; border-radius: 4px; font-size: 11px; color: #004085;">
+                                        📦 ${question.answer_fragments.length} fragment(s) from ${question.chunks_analyzed.length} chunk(s)
+                                    </div>` : ''
                                 }
                             </td>
                             <td style="padding: 12px; max-width: 250px;">
-                                <div style="font-style: italic; color: #666; font-size: 14px;">${result.citation || 'No citation'}</div>
+                                <div style="font-style: italic; color: #666; font-size: 13px;">${question.citation}</div>
                             </td>
+                            <td style="padding: 12px; text-align: center; font-family: monospace; color: #666; font-size: 12px;">${question.pdf_page}</td>
                             <td style="padding: 12px; text-align: center;">
-                                <span style="display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; color: white; background: ${confidenceColor};">
-                                    ${result.confidence}
+                                <span style="display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; color: white; background: ${confidenceColor};">
+                                    ${question.confidence.toUpperCase()}
                                 </span>
                             </td>
-                            <td style="padding: 12px; text-align: center; font-family: monospace; color: #666;">${result.chunk_number || '-'}</td>
+                            <td style="padding: 12px; text-align: center;">
+                                <span style="display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 11px; font-weight: bold; color: white; background: ${statusColor};">
+                                    ${question.status}
+                                </span>
+                            </td>
                         </tr>
                     `;
                 });
 
                 tableHTML += '</tbody></table>';
 
-                // Add summary
+                // Add comprehensive summary
                 const summary = `
-                    <div style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 6px;">
-                        <h4>📊 Analysis Summary</h4>
-                        <p><strong>Total Results:</strong> ${this.results.length}</p>
-                        <p><strong>Document:</strong> ${this.currentFile?.name || 'Unknown'}</p>
-                        <p><strong>Status:</strong> ${this.shouldStop ? `Stopped at chunk ${this.currentChunk}/${this.totalChunks}` : 'Completed'}</p>
-                        <p><strong>Sections Analyzed:</strong> ${Object.keys(this.getActiveSections()).join(', ')}</p>
+                    <div style="margin-top: 20px; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 8px; color: white;">
+                        <h3 style="margin-bottom: 15px; color: white;">📊 Final Analysis Summary</h3>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                            <div style="background: rgba(255,255,255,0.2); padding: 12px; border-radius: 6px;">
+                                <div style="font-size: 24px; font-weight: bold;">${this.allQuestions.length}</div>
+                                <div style="font-size: 12px; opacity: 0.9;">Total Questions</div>
+                            </div>
+                            <div style="background: rgba(255,255,255,0.2); padding: 12px; border-radius: 6px;">
+                                <div style="font-size: 24px; font-weight: bold; color: #90EE90;">${answeredCount}</div>
+                                <div style="font-size: 12px; opacity: 0.9;">Answered</div>
+                            </div>
+                            <div style="background: rgba(255,255,255,0.2); padding: 12px; border-radius: 6px;">
+                                <div style="font-size: 24px; font-weight: bold;">${this.allQuestions.length - answeredCount}</div>
+                                <div style="font-size: 12px; opacity: 0.9;">Not Found</div>
+                            </div>
+                            <div style="background: rgba(255,255,255,0.2); padding: 12px; border-radius: 6px;">
+                                <div style="font-size: 24px; font-weight: bold;">${Math.round((answeredCount / this.allQuestions.length) * 100)}%</div>
+                                <div style="font-size: 12px; opacity: 0.9;">Completion Rate</div>
+                            </div>
+                        </div>
+                        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.3);">
+                            <p style="margin: 5px 0;"><strong>Document:</strong> ${this.currentFile?.name || 'Unknown'}</p>
+                            <p style="margin: 5px 0;"><strong>Status:</strong> ${this.shouldStop ? `⏹️ Stopped at chunk ${this.currentChunk}/${this.totalChunks}` : '✅ Complete'}</p>
+                            <p style="margin: 5px 0;"><strong>Chunks Analyzed:</strong> ${this.totalChunks}</p>
+                            <p style="margin: 5px 0;"><strong>Sections:</strong> ${Object.keys(this.getActiveSections()).join(', ')}</p>
+                        </div>
                     </div>
                 `;
 
                 resultsContent.innerHTML = tableHTML + summary;
                 document.getElementById('resultsSection').style.display = 'block';
-                Logger.success(`📋 Displayed ${this.results.length} results`);
+                Logger.success(`📋 Displayed unified results: ${answeredCount}/${this.allQuestions.length} questions answered`);
             }
 
             async exportResults() {
-                if (this.results.length === 0) {
+                if (!this.allQuestions || this.allQuestions.length === 0) {
                     Logger.warning("No results to export");
                     return;
                 }
 
-                let csvContent = "Section,Question_Number,Question,Answer,Citation,Confidence,Chunk\\n";
+                // Export UNIFIED accumulated results with sequential numbering
+                let csvContent = "Section,Question_Number,Question,Answer_Accumulated,Citations,PDF_Pages,Confidence,Status,Chunks_Analyzed,Answer_Fragments\\n";
 
-                this.results.forEach(result => {
+                this.allQuestions.forEach(question => {
                     const row = [
-                        `"${(result.section || '').replace(/"/g, '""')}"`,
-                        `"${result.question_number || ''}"`,
-                        `"${(result.question || '').replace(/"/g, '""')}"`,
-                        `"${(result.answer || '').replace(/"/g, '""')}"`,
-                        `"${(result.citation || '').replace(/"/g, '""')}"`,
-                        `"${result.confidence || 'medium'}"`,
-                        `"${result.chunk_number || ''}"`
+                        `"${(question.section || '').replace(/"/g, '""')}"`,
+                        `"${question.question_number || ''}"`,
+                        `"${(question.question || '').replace(/"/g, '""')}"`,
+                        `"${(question.answer || '').replace(/"/g, '""')}"`,
+                        `"${(question.citation || '').replace(/"/g, '""')}"`,
+                        `"${(question.pdf_page || '').replace(/"/g, '""')}"`,
+                        `"${question.confidence || 'pending'}"`,
+                        `"${question.status || 'pending'}"`,
+                        `"${question.chunks_analyzed.length}"`,
+                        `"${question.answer_fragments.length}"`
                     ].join(',');
                     csvContent += row + "\\n";
                 });
@@ -1927,15 +2043,20 @@ ${text}
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `cipp_analysis_${new Date().toISOString().split('T')[0]}.csv`;
+
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+                const answeredCount = this.allQuestions.filter(q => q.status === 'found').length;
+                a.download = `cipp_analysis_${timestamp}_${answeredCount}of${this.allQuestions.length}.csv`;
+
                 a.click();
                 URL.revokeObjectURL(url);
 
-                Logger.success(`📊 Results exported as CSV file`);
+                Logger.success(`📊 Exported unified results: ${answeredCount}/${this.allQuestions.length} questions answered`);
             }
 
             clearResults() {
                 this.results = [];
+                this.allQuestions = [];
                 document.getElementById('resultsSection').style.display = 'none';
                 document.getElementById('logContent').innerHTML = '';
                 document.getElementById('logContainer').style.display = 'none';
